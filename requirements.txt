@@ -1,0 +1,14 @@
+fastapi
+uvicorn
+transformers
+pandas
+scikit-learn
+numpy
+streamlit
+requests
+langchain
+langchain-openai
+langchain-community
+chromadb
+
+
