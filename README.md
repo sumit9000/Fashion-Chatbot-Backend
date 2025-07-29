@@ -80,13 +80,16 @@ json
 ---
 
 ## 🗂 File Structure
-
-
 fashion-chatbot-backend/
+
 ├── api_server.py         # FastAPI app
+
 ├── chatbot_engine.py     # Handles LLM + vector DB interaction
+
 ├── requirements.txt      # Dependencies
+
 ├── .env (optional)       # Environment variable storage
+
 ├── start.sh              # Script for deployment
 
 
