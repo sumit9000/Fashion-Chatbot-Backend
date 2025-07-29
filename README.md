@@ -1,10 +1,10 @@
-# 🧠 Fashion Chatbot Backend
+#  Fashion Chatbot Backend
 
 This is the *backend API* for the Fashion Chatbot project, built using *FastAPI*. It processes user queries and returns intelligent fashion-related suggestions using LLMs and vector search.
 
 ---
 
-## 🚀 Features
+##  Features
 
 * FastAPI-based RESTful API
 * Handles chat interactions via POST requests
@@ -14,7 +14,7 @@ This is the *backend API* for the Fashion Chatbot project, built using *FastAPI*
 
 ---
 
-## 🛠 Tech Stack
+##  Tech Stack
 
 * *Language*: Python 3.10+
 * *Framework*: FastAPI
@@ -34,7 +34,7 @@ pip install -r requirements.txt
 
 ---
 
-## 🚨 Environment Variables
+##  Environment Variables
 
 Before running, set the following environment variable:
 
@@ -56,7 +56,7 @@ By default, the app runs at: http://127.0.0.1:8000
 
 ---
 
-## 🧪 API Usage
+##  API Usage
 
 ### POST /chat
 
