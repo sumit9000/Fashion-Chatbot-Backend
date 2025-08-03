@@ -281,10 +281,9 @@ async def get_user_history(user_id: str):
             status_code=500
         )
 
-if __name__ == "__main__":
+if _name_ == "_main_":
     print("🌟 Starting Fashion Chatbot API Server...")
     print("📝 OpenAI API key will be loaded from environment or fallback")
     print("🚀 Server will be available at: http://localhost:8000")
     print("📚 API docs will be at: http://localhost:8000/docs")
     uvicorn.run("api_server:app", host="0.0.0.0", port=8000, reload=True)
-
