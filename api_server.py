@@ -1,212 +1,289 @@
-# api_server.py
+# api_server.py - Updated version with better validation
 
-# --- Imports from your notebook ---
+from fastapi import FastAPI, UploadFile, File, Form, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
+from contextlib import asynccontextmanager
 import os
-import json
 import sqlite3
-from getpass import getpass
-from fastapi import FastAPI
-from pydantic import BaseModel
+from dotenv import load_dotenv
+from main import (
+    FashionChatbot,
+    FashionDatabase,
+    FashionRecommendationEngine,
+    ChatOpenAI,
+    OpenAIEmbeddings,
+    FAISS,
+    RecursiveCharacterTextSplitter,
+    Document,
+)
+import uvicorn
 
-from langchain_openai import ChatOpenAI, OpenAIEmbeddings
-from langchain_community.vectorstores import Chroma
-from langchain.chains import create_retrieval_chain
-from langchain.chains.combine_documents import create_stuff_documents_chain
-from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
-from langchain.chains import create_history_aware_retriever
-from langchain_community.chat_message_histories import SQLChatMessageHistory
-from langchain_core.runnables.history import RunnableWithMessageHistory
-from langchain.docstore.document import Document
+# Global chatbot instance
+chatbot = None
 
-# --- Setup OpenAI API Key ---
-# For security, it's best to set this as an environment variable.
-# You can uncomment the getpass line for testing if you prefer.
-# os.environ['OPENAI_API_KEY'] = getpass("Enter your API Token here: ")
-if 'OPENAI_API_KEY' not in os.environ:
-    print("🚨 OPENAI_API_KEY environment variable not set. Please set it before running.")
-    exit()
-
-# --- Initialize Models (from notebook) ---
-chatgpt = ChatOpenAI(model_name="gpt-4o-mini", temperature=0.1)
-openai_embed_model = OpenAIEmbeddings(model="text-embedding-3-small")
-
-# --- All Classes from your Notebook (FashionDatabase, FashionRecommendationEngine, FashionChatbot) ---
-# I've copied them here directly for completeness.
-
-class FashionDatabase:
-    def __init__(self, db_path="fashion_data.db"):
-        self.db_path = db_path
-        self.init_database()
-    
-    def init_database(self):
-        conn = sqlite3.connect(self.db_path)
-        cursor = conn.cursor()
-        cursor.execute('''
-        CREATE TABLE IF NOT EXISTS products (
-            id INTEGER PRIMARY KEY, name TEXT NOT NULL, category TEXT, subcategory TEXT,
-            brand TEXT, price REAL, color TEXT, size TEXT, description TEXT,
-            style_tags TEXT, season TEXT, gender TEXT, occasion TEXT, material TEXT,
-            image_url TEXT, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        )''')
-        cursor.execute('''
-        CREATE TABLE IF NOT EXISTS user_behavior (
-            id INTEGER PRIMARY KEY, user_id TEXT NOT NULL, action_type TEXT NOT NULL,
-            product_id INTEGER, query TEXT, preferences TEXT,
-            timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            FOREIGN KEY (product_id) REFERENCES products (id)
-        )''')
-        conn.commit()
-        conn.close()
-
-    def add_product(self, product_data):
-        conn = sqlite3.connect(self.db_path)
-        cursor = conn.cursor()
-        cursor.execute('INSERT OR IGNORE INTO products (id, name, category, subcategory, brand, price, color, size, description, style_tags, season, gender, occasion, material, image_url) VALUES (NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)', product_data)
-        conn.commit()
-        conn.close()
-
-    def track_user_behavior(self, user_id, action_type, product_id=None, query=None, preferences=None):
-        conn = sqlite3.connect(self.db_path)
-        cursor = conn.cursor()
-        cursor.execute('INSERT INTO user_behavior (user_id, action_type, product_id, query, preferences) VALUES (?, ?, ?, ?, ?)',
-                       (user_id, action_type, product_id, query, json.dumps(preferences) if preferences else None))
-        conn.commit()
-        conn.close()
-
-    def get_user_behavior_data(self, user_id, limit=20):
-        conn = sqlite3.connect(self.db_path)
-        cursor = conn.cursor()
-        cursor.execute('''
-            SELECT ub.*, p.name, p.category, p.brand, p.color, p.style_tags
-            FROM user_behavior ub LEFT JOIN products p ON ub.product_id = p.id
-            WHERE ub.user_id = ? ORDER BY ub.timestamp DESC LIMIT ?
-        ''', (user_id, limit))
-        # Fetchall returns a list of tuples. We need to convert it to a list of dicts for easier access.
-        columns = [description[0] for description in cursor.description]
-        return [dict(zip(columns, row)) for row in cursor.fetchall()]
-
-class FashionRecommendationEngine:
-    def __init__(self, fashion_db, vector_retriever):
-        self.fashion_db = fashion_db
-        self.vector_retriever = vector_retriever
-    
-    def analyze_user_preferences(self, user_id):
-        behavior_data = self.fashion_db.get_user_behavior_data(user_id, limit=50)
-        preferences = {"preferred_colors": [], "preferred_brands": [], "preferred_categories": []}
-        for record in behavior_data:
-            if record.get("product_id"):
-                if record.get("color"): preferences["preferred_colors"].append(record["color"])
-                if record.get("brand"): preferences["preferred_brands"].append(record["brand"])
-                if record.get("category"): preferences["preferred_categories"].append(record["category"])
-        for key in preferences:
-            preferences[key] = list(set(preferences[key]))[:3]
-        return preferences
-
-    def get_personalized_recommendations(self, user_id, query, limit=3):
-        user_preferences = self.analyze_user_preferences(user_id)
-        enhanced_query = f"{query} preferred colors: {', '.join(user_preferences['preferred_colors'])} preferred brands: {', '.join(user_preferences['preferred_brands'])}"
-        similar_docs = self.vector_retriever.invoke(enhanced_query)
-        recommendations = [{"product_id": doc.metadata.get("product_id"), "name": doc.metadata.get("name")} for doc in similar_docs[:limit]]
-        return recommendations
-
-class FashionChatbot:
-    def __init__(self, chatgpt, retriever, fashion_db, rec_engine):
-        self.chatgpt = chatgpt
-        self.retriever = retriever
-        self.fashion_db = fashion_db
-        self.rec_engine = rec_engine
-        self.setup_chains()
-    
-    def setup_chains(self):
-        rephrase_system_prompt = "Given a conversation history and a user question, formulate a standalone fashion-related question."
-        rephrase_prompt = ChatPromptTemplate.from_messages([("system", rephrase_system_prompt), MessagesPlaceholder("chat_history"), ("human", "{input}")])
-        self.history_aware_retriever = create_history_aware_retriever(self.chatgpt, self.retriever, rephrase_prompt)
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Lifespan context manager for startup and shutdown events"""
+    global chatbot
+    # Startup
+    try:
+        print("🚀 Initializing Fashion Chatbot API...")
+        load_dotenv()
         
-        qa_system_prompt = "You are an expert fashion stylist. Use the retrieved fashion product info to give personalized advice. Context: {context}"
-        qa_prompt = ChatPromptTemplate.from_messages([("system", qa_system_prompt), MessagesPlaceholder("chat_history"), ("human", "{input}")])
-        question_answer_chain = create_stuff_documents_chain(self.chatgpt, qa_prompt)
-        self.rag_chain = create_retrieval_chain(self.history_aware_retriever, question_answer_chain)
-        
-        def get_session_history(session_id):
-            return SQLChatMessageHistory(session_id, "sqlite:///fashion_memory.db")
-        
-        self.conversational_chain = RunnableWithMessageHistory(
-            self.rag_chain, get_session_history,
-            input_messages_key="input", history_messages_key="chat_history", output_messages_key="answer"
+        openai_key = (
+            os.getenv("OPENAI_API_KEY") or
+            ""  # Add your fallback key here
         )
 
-    def chat(self, user_id, message):
-        self.fashion_db.track_user_behavior(user_id, "query", query=message)
-        recommendations = self.rec_engine.get_personalized_recommendations(user_id, message, limit=3)
-        response = self.conversational_chain.invoke(
-            {"input": message},
-            config={"configurable": {"session_id": user_id}}
-        )
-        return {"answer": response["answer"], "recommendations": recommendations}
+        if not openai_key:
+            raise Exception("OPENAI_API_KEY not found. Please set it as an environment variable or in .env file")
 
-# --- Initialization Logic (from notebook) ---
-fashion_db = FashionDatabase()
+        os.environ["OPENAI_API_KEY"] = openai_key
+        print("✅ OpenAI API key loaded successfully")
 
-def load_fashion_data():
-    sample_products = [
-        ("Classic Denim Jacket", "Outerwear", "Jackets", "Levi's", 89.99, "Blue", "M", "A timeless denim jacket.", "casual,classic", "All Season", "Unisex", "Casual", "Cotton", ""),
-        ("Floral Summer Dress", "Dresses", "Midi", "Zara", 59.99, "Pink", "S", "A light floral midi dress.", "feminine,floral", "Summer", "Women", "Casual", "Polyester", ""),
-        ("Business Suit Set", "Suits", "Two-piece", "Hugo Boss", 299.99, "Navy", "L", "A professional two-piece suit.", "professional,formal", "All Season", "Men", "Business", "Wool", ""),
-        ("Vintage Leather Boots", "Shoes", "Boots", "Dr. Martens", 149.99, "Black", "9", "Classic leather combat boots.", "edgy,vintage", "Fall", "Unisex", "Casual", "Leather", "")
-    ]
-    for product in sample_products:
-        fashion_db.add_product(product)
+        print("1️⃣ Setting up OpenAI models...")
+        chatgpt = ChatOpenAI(model_name="gpt-4o", temperature=0.1)
+        openai_embed_model = OpenAIEmbeddings(model="text-embedding-3-small")
 
-def create_vector_db():
-    conn = sqlite3.connect("fashion_data.db")
-    cursor = conn.cursor()
-    cursor.execute("SELECT * FROM products")
-    products = cursor.fetchall()
-    fashion_docs = []
-    for p in products:
-        content = f"Product: {p[1]}, Category: {p[2]}, Brand: {p[4]}, Price: ${p[5]}, Description: {p[8]}, Style: {p[9]}"
-        doc = Document(page_content=content, metadata={"product_id": p[0], "name": p[1], "brand": p[4]})
-        fashion_docs.append(doc)
-    conn.close()
-    
-    if not fashion_docs:
-        return None
+        print("2️⃣ Setting up database...")
+        fashion_db = FashionDatabase()
+
+        print("3️⃣ Building vector database...")
+        fashion_docs = []
         
-    vector_db = Chroma.from_documents(
-        documents=fashion_docs, 
-        embedding=openai_embed_model,
-        persist_directory="./fashion_vector_db"
-    )
-    return vector_db.as_retriever(search_kwargs={"k": 5})
+        conn = sqlite3.connect(fashion_db.db_path)
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM products")
+        products = cursor.fetchall()
+        conn.close()
 
-print("Loading initial data and creating vector database...")
-load_fashion_data()
-fashion_retriever = create_vector_db()
+        for product in products:
+            content = f"""
+Product: {product[1]}
+Category: {product[2]} - {product[3]}
+Brand: {product[4]}
+Price: ${product[5]}
+Color: {product[6]}
+Size: {product[7]}
+Description: {product[8]}
+Style: {product[9]}
+Season: {product[10]}
+Gender: {product[11]}
+Occasion: {product[12]}
+Material: {product[13]}
+"""
+            doc = Document(
+                page_content=content,
+                metadata={
+                    "product_id": product[0],
+                    "name": product[1],
+                    "category": product[2],
+                    "brand": product[4],
+                    "price": product[5],
+                }
+            )
+            fashion_docs.append(doc)
 
-if fashion_retriever:
-    rec_engine = FashionRecommendationEngine(fashion_db, fashion_retriever)
-    fashion_chatbot = FashionChatbot(chatgpt, fashion_retriever, fashion_db, rec_engine)
-    print("✅ Backend is ready.")
-else:
-    print("❌ Could not initialize retriever. No data found.")
-    fashion_chatbot = None
+        splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
+        chunked_docs = splitter.split_documents(fashion_docs)
 
+        fashion_db_vector = FAISS.from_documents(
+            documents=chunked_docs,
+            embedding=openai_embed_model
+        )
 
-# --- FastAPI Application ---
-app = FastAPI(title="Fashion Chatbot API")
+        fashion_db_vector.save_local("fashion_faiss_db")
 
-class ChatRequest(BaseModel):
-    user_id: str
-    message: str
+        fashion_retriever = fashion_db_vector.as_retriever(
+            search_type="similarity",
+            search_kwargs={"k": 5},
+        )
 
-@app.post("/chat")
-def chat_endpoint(req: ChatRequest):
-    if not fashion_chatbot:
-        return {"error": "Chatbot is not initialized."}
-    response = fashion_chatbot.chat(req.user_id, req.message)
-    return response
+        print("4️⃣ Setting up recommendation engine...")
+        rec_engine = FashionRecommendationEngine(fashion_db, fashion_retriever)
+
+        print("5️⃣ Initializing chatbot...")
+        chatbot_obj = FashionChatbot(chatgpt, fashion_retriever, fashion_db, rec_engine)
+        chatbot = chatbot_obj
+
+        print("✅ Fashion Chatbot API ready!")
+        
+    except Exception as e:
+        print(f"❌ Error during startup: {e}")
+        raise e
+
+    yield
+
+    print("🔄 Shutting down Fashion Chatbot API...")
+
+app = FastAPI(title="Fashion Chatbot API", version="1.0.0", lifespan=lifespan)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 @app.get("/")
-def root():
-    return {"message": "Fashion Chatbot API is running. Use the /chat endpoint to interact."}
+async def root():
+    """Health check endpoint"""
+    return {
+        "status": "ok",
+        "message": "Fashion Chatbot API is running",
+        "version": "1.0.0"
+    }
 
+@app.get("/health")
+async def health_check():
+    """Detailed health check"""
+    global chatbot
+    return {
+        "status": "healthy" if chatbot is not None else "initializing",
+        "chatbot_ready": chatbot is not None,
+        "message": "API is operational"
+    }
+
+@app.post("/chat")
+async def chat_endpoint(
+    user_id: str = Form(...),
+    message: str = Form(""),
+    image: UploadFile = File(None),
+):
+    """Main chat endpoint with optional image upload - ENHANCED VERSION"""
+    global chatbot
+    
+    if chatbot is None:
+        raise HTTPException(status_code=503, detail="Chatbot is not ready yet")
+    
+    # Validate input
+    if not message.strip() and image is None:
+        raise HTTPException(
+            status_code=400, 
+            detail="Either message or image must be provided"
+        )
+    
+    try:
+        image_content = None
+        if image is not None:
+            # Validate image file
+            if not image.content_type.startswith('image/'):
+                raise HTTPException(
+                    status_code=400,
+                    detail="File must be an image (jpg, jpeg, png)"
+                )
+            
+            image_content = await image.read()
+            print(f"📸 Received image: {image.filename}, Size: {len(image_content)} bytes")
+
+        # Use default message if only image provided
+        if not message.strip() and image is not None:
+            message = "Please analyze this fashion image and provide styling advice"
+
+        response = chatbot.chat(user_id, message, image_bytes=image_content)
+        return response
+
+    except HTTPException:
+        raise  # Re-raise HTTP exceptions
+    except Exception as e:
+        print(f"❌ Error in /chat endpoint: {e}")
+        return JSONResponse(
+            {"success": False, "error": str(e), "answer": "Sorry, I encountered an error."},
+            status_code=500
+        )
+
+@app.get("/products")
+async def get_products():
+    """Get all fashion products"""
+    global chatbot
+    if chatbot is None:
+        raise HTTPException(status_code=503, detail="Chatbot is not ready yet")
+    
+    try:
+        products = chatbot.fashion_db.get_all_products()
+        formatted_products = []
+        
+        for product in products:
+            formatted_product = {
+                "id": product[0],
+                "name": product[1],
+                "category": product[2],
+                "subcategory": product[3],
+                "brand": product[4],
+                "price": product[5],
+                "color": product[6],
+                "size": product[7],
+                "description": product[8],
+                "style_tags": product[9],
+                "season": product[10],
+                "gender": product[11],
+                "occasion": product[12],
+                "material": product[13]
+            }
+            formatted_products.append(formatted_product)
+
+        return {
+            "success": True,
+            "products": formatted_products,
+            "count": len(formatted_products)
+        }
+
+    except Exception as e:
+        print(f"❌ Error in /products endpoint: {e}")
+        return JSONResponse(
+            {"success": False, "error": str(e)},
+            status_code=500
+        )
+
+@app.get("/user/{user_id}/history")
+async def get_user_history(user_id: str):
+    """Get user chat/upload history"""
+    global chatbot
+    if chatbot is None:
+        raise HTTPException(status_code=503, detail="Chatbot is not ready yet")
+    
+    try:
+        conn = sqlite3.connect(chatbot.fashion_db.db_path)
+        cursor = conn.cursor()
+        cursor.execute('''
+            SELECT * FROM user_images
+            WHERE user_id = ?
+            ORDER BY upload_timestamp DESC
+            LIMIT 10
+        ''', (user_id,))
+        images = cursor.fetchall()
+        conn.close()
+
+        formatted_images = []
+        for img in images:
+            formatted_img = {
+                "id": img[0],
+                "user_id": img[1],
+                "image_path": img[2],
+                "description": img[3],
+                "upload_timestamp": img[6] if len(img) > 6 else None
+            }
+            formatted_images.append(formatted_img)
+
+        return {
+            "success": True,
+            "user_id": user_id,
+            "images": formatted_images,
+            "count": len(formatted_images)
+        }
+
+    except Exception as e:
+        print(f"❌ Error in /user/{user_id}/history endpoint: {e}")
+        return JSONResponse(
+            {"success": False, "error": str(e)},
+            status_code=500
+        )
+
+if _name_ == "_main_":
+    print("🌟 Starting Fashion Chatbot API Server...")
+    print("📝 OpenAI API key will be loaded from environment or fallback")
+    print("🚀 Server will be available at: http://localhost:8000")
+    print("📚 API docs will be at: http://localhost:8000/docs")
+    uvicorn.run("api_server:app", host="0.0.0.0", port=8000, reload=True)
