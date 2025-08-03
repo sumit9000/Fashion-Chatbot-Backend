@@ -31,7 +31,7 @@ from langchain_core.output_parsers import StrOutputParser
 class FashionDatabase:
     """Enhanced database class with image support"""
     
-    def __init__(self, db_path="fashion_data.db"):
+    def _init_(self, db_path="fashion_data.db"):
         self.db_path = db_path
         self.init_database()
     
@@ -252,7 +252,7 @@ class FashionDatabase:
 class ImageAnalysisService:
     """Service for analyzing fashion images using AI"""
     
-    def __init__(self, openai_native_client):
+    def _init_(self, openai_native_client):
         self.openai_client = openai_native_client
     
     def analyze_fashion_image(self, image_bytes, user_query=None):
@@ -326,7 +326,7 @@ class ImageAnalysisService:
 class FashionRecommendationEngine:
     """Improved Fashion recommendation engine"""
 
-    def __init__(self, fashion_db, retriever=None):
+    def _init_(self, fashion_db, retriever=None):
         self.fashion_db = fashion_db
         self.retriever = retriever
 
@@ -482,7 +482,7 @@ class FashionRecommendationEngine:
 class FashionChatbot:
     """Main Fashion Chatbot class for API usage"""
     
-    def __init__(self, chatgpt, retriever, fashion_db, rec_engine):
+    def _init_(self, chatgpt, retriever, fashion_db, rec_engine):
         self.chatgpt = chatgpt
         self.retriever = retriever
         self.fashion_db = fashion_db
@@ -687,5 +687,5 @@ def interactive_mode():
             for i, rec in enumerate(response['recommendations'], 1):
                 print(f"{i}. {rec['name']} - ${rec['price']} ({rec['brand']})")
 
-if __name__ == "__main__":
+if _name_ == "_main_":
     interactive_mode()
