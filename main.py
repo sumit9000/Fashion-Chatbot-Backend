@@ -687,5 +687,5 @@ def interactive_mode():
             for i, rec in enumerate(response['recommendations'], 1):
                 print(f"{i}. {rec['name']} - ${rec['price']} ({rec['brand']})")
 
-if _name_ == "_main_":
+if __name__ == "__main__":
     interactive_mode()
